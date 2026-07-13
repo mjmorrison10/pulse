@@ -514,7 +514,8 @@
     $("#ytkeyclear").addEventListener("click", function () { $("#ytkey").value = ""; settings.ytKey = ""; saveSettings(); if (window.StackData) window.StackData.clearSharedKey("ytKey"); $("#ytkeystatus").textContent = "No key saved."; $("#ytkeystatus").className = "keystatus empty"; });
     $("#keysave").addEventListener("click", function () {
       var k = $("#ytkey").value.trim();
-      if (k && !/^AIza[0-9A-Za-z_\-]{20,}$/.test(k)) { toast("That doesn't look like a Google API key"); return; }
+      // Accept both Google key formats: legacy "AIza…" and newer "AQ.Ab…" (2026 rollout).
+      if (k && !/^(AIza[0-9A-Za-z_\-]{20,}|AQ\.[0-9A-Za-z_\-.]{20,})$/.test(k)) { toast("That doesn't look like a Google API key"); return; }
       settings.ytKey = k; saveSettings();
       if (window.StackData) { if (k) window.StackData.writeSharedKeys({ ytKey: k }); else window.StackData.clearSharedKey("ytKey"); }
       closeSettings(); toast("Settings saved");
