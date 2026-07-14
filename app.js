@@ -202,7 +202,7 @@
   }
 
   // ---------- import from BLAST ----------
-  function makePost(platform, url, caption, postedAt, hook, blastKey) {
+  function makePost(platform, url, caption, postedAt, hook, blastKey, clipKey) {
     // hook is its own field now; when absent (legacy callers, old backups) fall
     // back to the caption's first line so nothing regresses.
     var h = (hook != null && String(hook).trim()) ? String(hook).trim() : String(caption || "").split("\n")[0].slice(0, 200);
@@ -210,6 +210,10 @@
       hook: h.slice(0, 200),
       postedAt: postedAt || Date.now(), snapshots: [], outcome: null, ledgerLoggedAt: null };
     if (blastKey) p.blastKey = blastKey;
+    // clipKey groups a clip's per-platform posts even when captions (and thus the
+    // caption-derived hook) differ per platform. It's the clip-level identity from
+    // the BLAST session (the hook, else the shared base caption).
+    if (clipKey) p.clipKey = String(clipKey).slice(0, 300);
     return p;
   }
   function importFromBlast() {
@@ -220,6 +224,10 @@
     var status = s.status || {}, postUrl = s.postUrl || {}, postedAt = s.postedAt || {},
       postedCaption = s.postedCaption || {}, captions = s.captions || {};
     var hook = (s.videoHook || "").trim();
+    // Clip-level key shared by every platform of this clip: the hook if set, else
+    // the base caption (written once, before per-platform tailoring). Per-platform
+    // captions differ, so we must NOT group on those.
+    var clipKey = hook || String(s.base || "").trim();
     var added = 0, skipped = 0, nolink = 0;
     Object.keys(status).forEach(function (name) {
       if (status[name] !== "posted") return;
@@ -230,7 +238,7 @@
       // (platform,url) match so posts imported before this change still dedupe.
       if (posts.some(function (p) { return p.blastKey === blastKey || (url && p.platform === name && p.url === url); })) { skipped++; return; }
       var cap = postedCaption[name] || captions[name] || s.base || "";
-      posts.unshift(makePost(name, url, cap, at, hook, blastKey));
+      posts.unshift(makePost(name, url, cap, at, hook, blastKey, clipKey));
       if (!url) nolink++;
       added++;
     });
@@ -292,6 +300,10 @@
   // so each clip is a single collapsible card; expand it for per-platform
   // tracking. No-hook posts stay singletons. Render-layer only, no stored change.
   function clipGroupKey(post) {
+    // Prefer the clip-level key (shared across platforms). Fall back to the hook
+    // for posts imported before clipKey existed, then to a per-post singleton.
+    var c = String(post.clipKey || "").trim().toLowerCase();
+    if (c) return "c:" + c;
     var h = String(post.hook || "").trim().toLowerCase();
     return h ? "h:" + h : "i:" + post.id;
   }
@@ -299,7 +311,7 @@
     var map = {}, order = [];
     posts.forEach(function (p) {
       var k = clipGroupKey(p);
-      if (!map[k]) { map[k] = { key: k, hook: p.hook, posts: [] }; order.push(k); }
+      if (!map[k]) { map[k] = { key: k, hook: (p.clipKey || p.hook), posts: [] }; order.push(k); }
       map[k].posts.push(p);
     });
     var groups = order.map(function (k) { return map[k]; });
