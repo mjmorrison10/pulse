@@ -232,7 +232,7 @@
     // one shared clipId, so a clip groups even when it has NO hook AND no base
     // caption (nothing caption-level to key on). This is the reliable grouping key.
     var clipId = uid();
-    var added = 0, skipped = 0, nolink = 0;
+    var added = 0, skipped = 0, nolink = 0, healed = 0;
     Object.keys(status).forEach(function (name) {
       if (status[name] !== "posted") return;
       var url = (postUrl[name] || "").trim();
@@ -240,7 +240,18 @@
       var blastKey = name + "|" + at;
       // Dedupe on the BLAST session key when we have one; fall back to the old
       // (platform,url) match so posts imported before this change still dedupe.
-      if (posts.some(function (p) { return p.blastKey === blastKey || (url && p.platform === name && p.url === url); })) { skipped++; return; }
+      var dupe = null;
+      for (var di = 0; di < posts.length; di++) {
+        var dp = posts[di];
+        if (dp.blastKey === blastKey || (url && dp.platform === name && dp.url === url)) { dupe = dp; break; }
+      }
+      if (dupe) {
+        // Re-import heals grouping: backfill the shared clipId onto posts tracked
+        // before clipId existed, so one re-import regroups an already-split clip.
+        if (!dupe.clipId) { dupe.clipId = clipId; healed++; }
+        skipped++;
+        return;
+      }
       var cap = postedCaption[name] || captions[name] || s.base || "";
       var np = makePost(name, url, cap, at, hook, blastKey, clipKey);
       np.clipId = clipId;
@@ -248,14 +259,16 @@
       if (!url) nolink++;
       added++;
     });
-    if (added) savePosts();
+    if (added || healed) savePosts();
     render();
     if (added) {
       var msg = "Imported " + added + " post" + (added > 1 ? "s" : "") + " from BLAST";
       if (nolink) msg += " — " + nolink + " without links yet (add each link on its card for stats)";
       else if (skipped) msg += " (" + skipped + " already tracked)";
+      if (healed) msg += ", regrouped " + healed + " already-tracked";
       toast(msg);
     }
+    else if (healed) toast("Regrouped " + healed + " already-tracked post" + (healed > 1 ? "s" : "") + " into this clip")
     else if (skipped) toast("Those BLAST posts are already tracked");
     else toast("Nothing marked Posted in BLAST yet");
     if (added) autoCheckDue(false);
