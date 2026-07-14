@@ -286,20 +286,47 @@
     out += sparkline(post);
     return out + '</div>';
   }
-  function render() {
-    var host = $("#posts");
-    if (!posts.length) {
-      host.innerHTML = '<div class="empty"><b>No posts tracked yet.</b> Import what you shipped from BLAST, or add one by hand above. Then check back at 1h, 2h, 6h.</div>';
-      return;
-    }
-    // sort: due checks first, then most recently posted
-    var now = Date.now();
-    var sorted = posts.slice().sort(function (a, b) {
-      var da = nextDue(a, now) != null ? 1 : 0, db = nextDue(b, now) != null ? 1 : 0;
-      if (da !== db) return db - da;
-      return b.postedAt - a.postedAt;
+  // === Clip grouping ===
+  // Posting one clip to N platforms creates N per-platform posts that all share
+  // the clip's hook (BLAST stamps s.videoHook on every one). Group by that hook
+  // so each clip is a single collapsible card; expand it for per-platform
+  // tracking. No-hook posts stay singletons. Render-layer only, no stored change.
+  function clipGroupKey(post) {
+    var h = String(post.hook || "").trim().toLowerCase();
+    return h ? "h:" + h : "i:" + post.id;
+  }
+  function buildClipGroups(now) {
+    var map = {}, order = [];
+    posts.forEach(function (p) {
+      var k = clipGroupKey(p);
+      if (!map[k]) { map[k] = { key: k, hook: p.hook, posts: [] }; order.push(k); }
+      map[k].posts.push(p);
     });
-    host.innerHTML = sorted.map(function (post) {
+    var groups = order.map(function (k) { return map[k]; });
+    groups.forEach(function (g) {
+      g.dueCount = g.posts.filter(function (p) { return nextDue(p, now) != null; }).length;
+      g.anyDue = g.dueCount > 0;
+      g.maxPostedAt = Math.max.apply(null, g.posts.map(function (p) { return p.postedAt; }));
+      var best = null;
+      g.posts.forEach(function (p) {
+        var s = latestSnap(p);
+        if (s && s.views != null && (!best || s.views > best.views)) best = { views: s.views, platform: p.platform };
+      });
+      g.best = best;
+      g.posts.sort(function (a, b) {
+        var ia = PLATFORMS.indexOf(a.platform); if (ia < 0) ia = 99;
+        var ib = PLATFORMS.indexOf(b.platform); if (ib < 0) ib = 99;
+        return ia !== ib ? ia - ib : a.postedAt - b.postedAt;
+      });
+    });
+    groups.sort(function (a, b) {
+      if (a.anyDue !== b.anyDue) return a.anyDue ? -1 : 1;
+      return b.maxPostedAt - a.maxPostedAt;
+    });
+    return groups;
+  }
+
+  function postCardHTML(post, now) {
       var yt = isYouTube(post) && ytId(post.url);
       var due = nextDue(post, now);
       var linkPart = post.url
@@ -339,7 +366,40 @@
         (post.ledgerLoggedAt ? '<span class="logged">✓ in HOOKLAB ledger</span>' : '') + '</div>';
 
       return '<div class="post">' + head + metricsHTML(post) + checksHTML(post) + snaprow + outcomerow + '</div>';
+  }
+
+  function render() {
+    var host = $("#posts");
+    if (!posts.length) {
+      host.innerHTML = '<div class="empty"><b>No posts tracked yet.</b> Import what you shipped from BLAST, or add one by hand above. Then check back at 1h, 2h, 6h.</div>';
+      return;
+    }
+    var now = Date.now();
+    var groups = buildClipGroups(now);
+    host.innerHTML = groups.map(function (g) {
+      var n = g.posts.length;
+      var dueTxt = g.dueCount ? (g.dueCount + " due now") : "none due";
+      var bestTxt = g.best ? ("best " + fmtNum(g.best.views) + " on " + esc(g.best.platform)) : "no views yet";
+      var summary = n + " platform" + (n > 1 ? "s" : "") + " · " + dueTxt + " · " + bestTxt;
+      var body = g.posts.map(function (p) { return postCardHTML(p, now); }).join("");
+      return '<div class="clipcard' + (g.anyDue ? ' due' : '') + '">' +
+        '<button class="cliphead" type="button" aria-expanded="false">' +
+        '<span class="clipchevron" aria-hidden="true">▸</span>' +
+        '<span class="cliphook">' + (esc(g.hook) || '(no hook noted)') + '</span>' +
+        '<span class="clipsummary">' + summary + '</span>' +
+        '</button>' +
+        '<div class="clipbody" hidden>' + body + '</div>' +
+        '</div>';
     }).join("");
+
+    host.querySelectorAll(".cliphead").forEach(function (head) {
+      head.addEventListener("click", function () {
+        var body = head.nextElementSibling;
+        if (!body) return;
+        if (body.hasAttribute("hidden")) { body.removeAttribute("hidden"); head.setAttribute("aria-expanded", "true"); head.classList.add("open"); }
+        else { body.setAttribute("hidden", ""); head.setAttribute("aria-expanded", "false"); head.classList.remove("open"); }
+      });
+    });
 
     // bind
     host.querySelectorAll("[data-act]").forEach(function (el) {
