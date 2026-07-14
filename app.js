@@ -228,6 +228,10 @@
     // the base caption (written once, before per-platform tailoring). Per-platform
     // captions differ, so we must NOT group on those.
     var clipKey = hook || String(s.base || "").trim();
+    // A BLAST session = one clip. Stamp every platform imported in this call with
+    // one shared clipId, so a clip groups even when it has NO hook AND no base
+    // caption (nothing caption-level to key on). This is the reliable grouping key.
+    var clipId = uid();
     var added = 0, skipped = 0, nolink = 0;
     Object.keys(status).forEach(function (name) {
       if (status[name] !== "posted") return;
@@ -238,7 +242,9 @@
       // (platform,url) match so posts imported before this change still dedupe.
       if (posts.some(function (p) { return p.blastKey === blastKey || (url && p.platform === name && p.url === url); })) { skipped++; return; }
       var cap = postedCaption[name] || captions[name] || s.base || "";
-      posts.unshift(makePost(name, url, cap, at, hook, blastKey, clipKey));
+      var np = makePost(name, url, cap, at, hook, blastKey, clipKey);
+      np.clipId = clipId;
+      posts.unshift(np);
       if (!url) nolink++;
       added++;
     });
@@ -300,8 +306,11 @@
   // so each clip is a single collapsible card; expand it for per-platform
   // tracking. No-hook posts stay singletons. Render-layer only, no stored change.
   function clipGroupKey(post) {
-    // Prefer the clip-level key (shared across platforms). Fall back to the hook
-    // for posts imported before clipKey existed, then to a per-post singleton.
+    // Per-import clipId first: the most reliable "same clip" signal (one BLAST
+    // import = one clip), independent of hook/caption. Then the clip-level
+    // caption/hook (merges re-imports and pre-clipId posts), then the
+    // caption-derived hook for legacy posts, else a per-post singleton.
+    if (post.clipId) return "g:" + post.clipId;
     var c = String(post.clipKey || "").trim().toLowerCase();
     if (c) return "c:" + c;
     var h = String(post.hook || "").trim().toLowerCase();
