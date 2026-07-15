@@ -31,7 +31,18 @@
   function ckLabel(h) { return h < 24 ? h + "h" : (h / 24) + "d"; }
 
   var posts = [];
-  var settings = { ytKey: "" };
+  var settings = { ytKey: "", view: "clips" }; // view: "clips" | "platforms"
+
+  // Which clip cards are open, keyed by group key. Every change rebuilds the
+  // whole list, so open state must live outside the DOM; sessionStorage also
+  // makes an accidental F5 painless. The picked platform in the "By platform"
+  // view is session-scoped too (it changes constantly while working a batch).
+  var SS_EXPANDED = "pulse_expanded_v1", SS_PLATFORM = "pulse_platform_v1";
+  var expandedKeys = {};
+  try { (JSON.parse(sessionStorage.getItem(SS_EXPANDED)) || []).forEach(function (k) { expandedKeys[k] = 1; }); } catch (e) {}
+  var currentPlatform = "";
+  try { currentPlatform = sessionStorage.getItem(SS_PLATFORM) || ""; } catch (e) {}
+  function saveExpanded() { try { sessionStorage.setItem(SS_EXPANDED, JSON.stringify(Object.keys(expandedKeys))); } catch (e) {} }
 
   function loadAll() {
     try { posts = JSON.parse(localStorage.getItem(LS_POSTS)) || []; } catch (e) { posts = []; }
@@ -47,6 +58,39 @@
   function saveSettings() {
     try { localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); return true; }
     catch (e) { toast("Couldn't save settings"); return false; }
+  }
+
+  // Heal split clips. A re-import used to mint a NEW clipId per call, so a clip
+  // imported in two waves (some platforms posted later) got two ids -> two
+  // cards, even though every post shared the same clipKey. Unify: same
+  // non-empty clipKey => one canonical clipId (the one whose earliest post is
+  // oldest). Replaced ids are stashed in clipIdPrev, so the rewrite is
+  // reversible; runs on every load and is a no-op once unified.
+  function migrateClipIds() {
+    var buckets = {};
+    posts.forEach(function (p) {
+      var k = String(p.clipKey || "").trim().toLowerCase();
+      if (k) (buckets[k] = buckets[k] || []).push(p);
+    });
+    var changed = 0;
+    Object.keys(buckets).forEach(function (k) {
+      var list = buckets[k];
+      var earliest = {}; // clipId -> earliest postedAt among its posts
+      list.forEach(function (p) {
+        if (p.clipId && (!(p.clipId in earliest) || p.postedAt < earliest[p.clipId])) earliest[p.clipId] = p.postedAt;
+      });
+      var ids = Object.keys(earliest);
+      if (!ids.length) return; // no clipIds here; the clipKey tier already groups these
+      var canonical = ids[0];
+      ids.forEach(function (id) { if (earliest[id] < earliest[canonical]) canonical = id; });
+      list.forEach(function (p) {
+        if (p.clipId === canonical) return;
+        if (p.clipId) p.clipIdPrev = p.clipId;
+        p.clipId = canonical;
+        changed++;
+      });
+    });
+    if (changed) savePosts();
   }
 
   // ---------- toast ----------
@@ -228,10 +272,28 @@
     // the base caption (written once, before per-platform tailoring). Per-platform
     // captions differ, so we must NOT group on those.
     var clipKey = hook || String(s.base || "").trim();
-    // A BLAST session = one clip. Stamp every platform imported in this call with
-    // one shared clipId, so a clip groups even when it has NO hook AND no base
-    // caption (nothing caption-level to key on). This is the reliable grouping key.
-    var clipId = uid();
+    // A BLAST session = one clip. Every platform imported in this call shares
+    // one clipId, so a clip groups even when it has NO hook AND no base caption.
+    // Reuse the clipId already carried by any tracked post of this same clip
+    // (dupe match or same clipKey; oldest post wins) — minting a fresh id per
+    // call is what used to split a clip imported in two waves. Mint only when
+    // no prior id exists.
+    var clipId = null, clipIdAt = Infinity;
+    var ckNorm = clipKey.toLowerCase();
+    posts.forEach(function (p) {
+      if (!p.clipId || p.postedAt >= clipIdAt) return;
+      var match = !!ckNorm && String(p.clipKey || "").trim().toLowerCase() === ckNorm;
+      if (!match) {
+        // same dupe predicate as the import loop below
+        match = Object.keys(status).some(function (name) {
+          if (status[name] !== "posted") return false;
+          var u = (postUrl[name] || "").trim();
+          return p.blastKey === name + "|" + postedAt[name] || (u && p.platform === name && p.url === u);
+        });
+      }
+      if (match) { clipId = p.clipId; clipIdAt = p.postedAt; }
+    });
+    if (!clipId) clipId = uid();
     var added = 0, skipped = 0, nolink = 0, healed = 0;
     Object.keys(status).forEach(function (name) {
       if (status[name] !== "posted") return;
@@ -246,9 +308,14 @@
         if (dp.blastKey === blastKey || (url && dp.platform === name && dp.url === url)) { dupe = dp; break; }
       }
       if (dupe) {
-        // Re-import heals grouping: backfill the shared clipId onto posts tracked
-        // before clipId existed, so one re-import regroups an already-split clip.
-        if (!dupe.clipId) { dupe.clipId = clipId; healed++; }
+        // Re-import heals grouping: unify this clip's shared clipId onto posts
+        // tracked before clipId existed OR stamped with a divergent id by an
+        // earlier import wave. The old id is kept in clipIdPrev (reversible).
+        if (dupe.clipId !== clipId) {
+          if (dupe.clipId) dupe.clipIdPrev = dupe.clipId;
+          dupe.clipId = clipId;
+          healed++;
+        }
         skipped++;
         return;
       }
@@ -293,12 +360,16 @@
 
   // ---------- render ----------
   function checksHTML(post) {
-    var now = Date.now(), covered = maxCovered(post), due = nextDue(post, now);
+    var now = Date.now(), covered = maxCovered(post), sawPending = false;
     return '<div class="checks">' + CHECKPOINTS.map(function (h) {
       var hMin = h * 60, dueTime = post.postedAt + hMin * 60000;
       if (hMin <= covered) return '<span class="checkchip done">' + ckLabel(h) + ' ✓</span>';
-      if (now >= dueTime) return '<span class="checkchip due' + (due === h ? '' : '') + '" data-act="focusrec" data-id="' + post.id + '">' + ckLabel(h) + ' due</span>';
-      return '<span class="checkchip pending">' + ckLabel(h) + ' ' + inHours(dueTime) + '</span>';
+      if (now >= dueTime) return '<span class="checkchip due" data-act="focusrec" data-id="' + post.id + '">' + ckLabel(h) + ' due</span>';
+      // "next" marks the first not-yet-due chip; mobile hides the rest of the
+      // pending tail to keep cards short.
+      var cls = sawPending ? "checkchip pending" : "checkchip pending next";
+      sawPending = true;
+      return '<span class="' + cls + '">' + ckLabel(h) + ' ' + inHours(dueTime) + '</span>';
     }).join("") + '</div>';
   }
   function metricsHTML(post) {
@@ -402,13 +473,79 @@
       return '<div class="post">' + head + metricsHTML(post) + checksHTML(post) + snaprow + outcomerow + '</div>';
   }
 
-  function render() {
-    var host = $("#posts");
-    if (!posts.length) {
-      host.innerHTML = '<div class="empty"><b>No posts tracked yet.</b> Import what you shipped from BLAST, or add one by hand above. Then check back at 1h, 2h, 6h.</div>';
-      return;
+  // === Platform grouping (the "By platform" view) ===
+  // One flat list per platform, newest post first — load a platform and walk
+  // straight down entering numbers.
+  function buildPlatformGroups(now) {
+    var map = {};
+    posts.forEach(function (p) { (map[p.platform] = map[p.platform] || []).push(p); });
+    var names = Object.keys(map);
+    names.sort(function (a, b) {
+      var ia = PLATFORMS.indexOf(a); if (ia < 0) ia = 99;
+      var ib = PLATFORMS.indexOf(b); if (ib < 0) ib = 99;
+      return ia !== ib ? ia - ib : (a < b ? -1 : 1);
+    });
+    return names.map(function (name) {
+      var list = map[name];
+      list.sort(function (a, b) { return b.postedAt - a.postedAt; });
+      return { name: name, posts: list, dueCount: list.filter(function (p) { return nextDue(p, now) != null; }).length };
+    });
+  }
+
+  // A thin row: identity + the record action. Everything else (outcome,
+  // delete, checkpoint strip) lives in the clip view — deliberate non-goal
+  // here so the walk-down list stays walkable.
+  function platformRowHTML(post, now) {
+    var due = nextDue(post, now);
+    var l = latestSnap(post);
+    var label = String(post.hook || "").trim();
+    var link = post.url
+      ? '<a class="prowlink" href="' + esc(post.url) + '" target="_blank" rel="noopener" title="Open post">↗</a>'
+      : '<button class="prowlink addlink" data-act="setlink" data-id="' + post.id + '" title="Add the live post link">＋</button>';
+    return '<div class="prow' + (due != null ? ' due' : '') + '">' +
+      '<div class="prowmain">' +
+      '<p class="prowlabel" title="' + esc(label || post.caption) + '">' + (esc(label) || '<span style="color:var(--faint)">(no hook)</span>') + '</p>' +
+      '<div class="prowmeta">' +
+      '<span>' + relTime(post.postedAt) + '</span>' +
+      '<span>' + (l ? fmtNum(l.views) + ' views' : 'no reading') + '</span>' +
+      (due != null ? '<span class="prowdue">' + ckLabel(due) + ' due</span>' : (post.snapshots.length ? '<span class="prowok">✓</span>' : '')) +
+      '</div></div>' +
+      link +
+      '<input type="number" min="0" inputmode="numeric" placeholder="views" id="snap-' + post.id + '">' +
+      '<button class="btn ghost" data-act="rec" data-id="' + post.id + '">Record</button>' +
+      '</div>';
+  }
+
+  function renderPlatformView(host, now) {
+    var groups = buildPlatformGroups(now);
+    // Sticky platform choice when it still exists; else first with something
+    // due (that's where the work is), else the first platform with posts.
+    var exists = groups.some(function (g) { return g.name === currentPlatform; });
+    if (!exists) {
+      currentPlatform = "";
+      groups.forEach(function (g) { if (!currentPlatform && g.dueCount) currentPlatform = g.name; });
+      if (!currentPlatform && groups.length) currentPlatform = groups[0].name;
     }
-    var now = Date.now();
+    var cur = null;
+    groups.forEach(function (g) { if (g.name === currentPlatform) cur = g; });
+    var chips = '<div class="platchips">' + groups.map(function (g) {
+      return '<button type="button" class="platchip' + (g.name === currentPlatform ? ' on' : '') + '" data-plat="' + esc(g.name) + '">' +
+        esc(g.name) + '<span class="platcount">' + g.posts.length + '</span>' +
+        (g.dueCount ? '<span class="platdue">' + g.dueCount + ' due</span>' : '') +
+        '</button>';
+    }).join("") + '</div>';
+    var rows = cur ? cur.posts.map(function (p) { return platformRowHTML(p, now); }).join("") : "";
+    host.innerHTML = chips + '<div class="prows">' + rows + '</div>';
+    host.querySelectorAll(".platchip").forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        currentPlatform = chip.getAttribute("data-plat");
+        try { sessionStorage.setItem(SS_PLATFORM, currentPlatform); } catch (e) {}
+        render();
+      });
+    });
+  }
+
+  function renderClipView(host, now) {
     var groups = buildClipGroups(now);
     host.innerHTML = groups.map(function (g) {
       var n = g.posts.length;
@@ -416,13 +553,16 @@
       var bestTxt = g.best ? ("best " + fmtNum(g.best.views) + " on " + esc(g.best.platform)) : "no views yet";
       var summary = n + " platform" + (n > 1 ? "s" : "") + " · " + dueTxt + " · " + bestTxt;
       var body = g.posts.map(function (p) { return postCardHTML(p, now); }).join("");
+      // Open state renders from expandedKeys, so a full rebuild (every data
+      // change does one) puts the cards back exactly as they were.
+      var open = !!expandedKeys[g.key];
       return '<div class="clipcard' + (g.anyDue ? ' due' : '') + '">' +
-        '<button class="cliphead" type="button" aria-expanded="false">' +
+        '<button class="cliphead' + (open ? ' open' : '') + '" type="button" data-key="' + esc(g.key) + '" aria-expanded="' + (open ? 'true' : 'false') + '">' +
         '<span class="clipchevron" aria-hidden="true">▸</span>' +
         '<span class="cliphook">' + (esc(g.hook) || '(no hook noted)') + '</span>' +
         '<span class="clipsummary">' + summary + '</span>' +
         '</button>' +
-        '<div class="clipbody" hidden>' + body + '</div>' +
+        '<div class="clipbody"' + (open ? '' : ' hidden') + '>' + body + '</div>' +
         '</div>';
     }).join("");
 
@@ -430,12 +570,46 @@
       head.addEventListener("click", function () {
         var body = head.nextElementSibling;
         if (!body) return;
-        if (body.hasAttribute("hidden")) { body.removeAttribute("hidden"); head.setAttribute("aria-expanded", "true"); head.classList.add("open"); }
-        else { body.setAttribute("hidden", ""); head.setAttribute("aria-expanded", "false"); head.classList.remove("open"); }
+        var key = head.getAttribute("data-key");
+        if (body.hasAttribute("hidden")) {
+          body.removeAttribute("hidden"); head.setAttribute("aria-expanded", "true"); head.classList.add("open");
+          if (key) expandedKeys[key] = 1;
+        } else {
+          body.setAttribute("hidden", ""); head.setAttribute("aria-expanded", "false"); head.classList.remove("open");
+          if (key) delete expandedKeys[key];
+        }
+        saveExpanded();
       });
     });
+  }
 
-    // bind
+  function syncViewToggle() {
+    var t = $("#viewToggle"); if (!t) return;
+    t.querySelectorAll("button").forEach(function (b) {
+      b.classList.toggle("on", b.getAttribute("data-view") === settings.view);
+    });
+  }
+
+  function render() {
+    var host = $("#posts");
+    // Capture/restore scroll around the innerHTML rebuild so recording a
+    // number doesn't teleport the page. Open state is baked into the markup
+    // (renderClipView), so the rebuilt page has the same height and layout.
+    var y = window.scrollY;
+    syncViewToggle();
+    if (!posts.length) {
+      host.innerHTML = '<div class="empty"><b>No posts tracked yet.</b> Import what you shipped from BLAST, or add one by hand above. Then check back at 1h, 2h, 6h.</div>';
+      return;
+    }
+    var now = Date.now();
+    if (settings.view === "platforms") renderPlatformView(host, now);
+    else renderClipView(host, now);
+    bindPostActions(host);
+    window.scrollTo(0, y);
+  }
+
+  // Shared by both views — they emit the same data-act / snap-<id> markup.
+  function bindPostActions(host) {
     host.querySelectorAll("[data-act]").forEach(function (el) {
       var id = el.getAttribute("data-id");
       var act = el.getAttribute("data-act");
@@ -465,16 +639,26 @@
       });
     });
     host.querySelectorAll("input[id^='snap-']").forEach(function (inp) {
-      inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { var id = inp.id.slice(5); var p = findPost(id); if (p) recordManual(p); } });
+      inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { var id = inp.id.slice(5); var p = findPost(id); if (p) recordManual(p, { advance: true }); } });
     });
   }
   function findPost(id) { for (var i = 0; i < posts.length; i++) if (posts[i].id === id) return posts[i]; return null; }
-  function recordManual(post) {
+  function recordManual(post, opts) {
     var inp = $("#snap-" + post.id);
     var v = inp ? inp.value.trim() : "";
     if (v === "" || isNaN(Number(v))) { toast("Enter the view count first"); if (inp) inp.focus(); return; }
     recordSnapshot(post, { views: Number(v) }, "manual");
     savePosts(); render();
+    if (opts && opts.advance) {
+      // Walk-down flow: after an Enter-record, put the cursor in the next
+      // visible views input so the next number is one keystroke away.
+      var inputs = document.querySelectorAll("input[id^='snap-']");
+      var seen = false;
+      for (var i = 0; i < inputs.length; i++) {
+        if (seen && inputs[i].offsetParent !== null) { inputs[i].focus(); break; }
+        if (inputs[i].id === "snap-" + post.id) seen = true;
+      }
+    }
     toast("Recorded " + fmtNum(Number(v)) + " views");
   }
 
@@ -629,6 +813,7 @@
     if (t) document.documentElement.setAttribute("data-theme", t);
 
     loadAll();
+    migrateClipIds();
 
     // populate platform checkboxes (pre-checked = platforms you're running) +
     // default posted-at = now (local)
@@ -637,6 +822,14 @@
     $("#mPostedAt").value = d.toISOString().slice(0, 16);
 
     initSettings();
+    var vt = $("#viewToggle");
+    if (vt) vt.querySelectorAll("button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var v = b.getAttribute("data-view");
+        if (settings.view === v) return;
+        settings.view = v; saveSettings(); render();
+      });
+    });
     $("#importBlast").addEventListener("click", importFromBlast);
     $("#mAdd").addEventListener("click", addManual);
     $("#checkAll").addEventListener("click", function () { autoCheckDue(true); });
