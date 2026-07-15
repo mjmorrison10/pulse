@@ -192,3 +192,61 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand)}
 .clipbody{padding:0 10px 8px}
 .clipbody .post{margin-top:10px}
 @media(max-width:560px){.clipsummary{white-space:normal;text-align:right}}
+
+/* === View toggle (By clip / By platform) === */
+.segmented{display:inline-flex;border:1px solid var(--border);border-radius:9px;overflow:hidden}
+.segmented button{font-family:var(--mono);font-size:11px;letter-spacing:.04em;padding:6px 12px;cursor:pointer;
+  background:none;border:0;color:var(--muted);white-space:nowrap}
+.segmented button+button{border-left:1px solid var(--border)}
+.segmented button.on{background:var(--brand-ghost);color:var(--brand);font-weight:700}
+.segmented button:hover:not(.on){color:var(--ink)}
+
+/* === Platform-first view === */
+.platchips{display:flex;gap:8px;overflow-x:auto;padding:2px 0 10px;-webkit-overflow-scrolling:touch}
+.platchip{flex:none;display:inline-flex;gap:7px;align-items:center;font-family:var(--mono);font-size:11px;
+  letter-spacing:.03em;padding:7px 12px;border-radius:20px;cursor:pointer;white-space:nowrap;
+  border:1px solid var(--border);background:var(--surface2);color:var(--muted)}
+.platchip:hover{border-color:var(--brand);color:var(--ink)}
+.platchip.on{color:var(--brand);border-color:var(--brand);background:var(--brand-ghost);font-weight:700}
+.platcount{font-size:10px;color:var(--faint)}
+.platchip.on .platcount{color:var(--brand)}
+.platdue{font-size:9.5px;color:var(--warn);background:var(--warn-ghost);padding:1px 6px;border-radius:20px}
+
+.prows{display:flex;flex-direction:column;gap:6px}
+.prow{display:flex;align-items:center;gap:10px;min-height:44px;padding:8px 12px;border-radius:10px;
+  border:1px solid var(--border);background:var(--surface2)}
+.prow.due{border-color:var(--warn)}
+.prowmain{flex:1;min-width:0}
+.prowlabel{margin:0;font-size:13px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.prowmeta{display:flex;gap:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:2px;align-items:center;overflow:hidden}
+.prowmeta>*{white-space:nowrap}
+.prowdue{color:var(--warn);background:var(--warn-ghost);padding:1px 6px;border-radius:20px}
+.prowok{color:var(--pos)}
+.prowlink{flex:none;color:var(--brand);text-decoration:none;font-size:14px;line-height:1;padding:4px}
+.prowlink.addlink{background:none;border:none;cursor:pointer;font:inherit;font-size:14px}
+.prowlink:hover{color:var(--brand-deep)}
+.prow input{max-width:96px;flex:none}
+.prow .btn{flex:none;padding:7px 11px}
+
+/* === Mobile compaction === */
+@media (max-width:560px){
+  .wrap{padding:14px 12px 60px}
+  .panel{padding:14px 12px}
+  .post{padding:10px 10px;margin-bottom:8px}
+  .post .hook{font-size:13px}
+  .metrics{gap:10px;margin:9px 0 3px}
+  .metric .n{font-size:16px}
+  .checks{gap:5px;margin-top:8px}
+  .checkchip{padding:3px 7px;font-size:9.5px}
+  /* keep cards short: show only the NEXT upcoming checkpoint, not the whole tail */
+  .checkchip.pending{display:none}
+  .checkchip.pending.next{display:inline-flex}
+  .snaprow{gap:6px;margin-top:8px}
+  .snaprow input{max-width:96px}
+  .cliphead{padding:10px 10px}
+  .clipbody{padding:0 6px 6px}
+  .outcomerow{margin-top:8px;padding-top:8px}
+  .prow{padding:7px 9px;gap:8px}
+  .prow input{max-width:82px}
+  .prow .btn{padding:7px 9px;font-size:11px}
+}
