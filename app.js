@@ -615,12 +615,14 @@
       var act = el.getAttribute("data-act");
       el.addEventListener("click", function () {
         var post = findPost(id); if (!post) return;
-        if (act === "del") { if (confirm("Stop tracking this post? (Its HOOKLAB ledger entry, if logged, stays.)")) { posts = posts.filter(function (p) { return p.id !== id; }); savePosts(); render(); toast("Stopped tracking"); } }
+        if (act === "del") { if (confirm("Stop tracking this post? (Its HOOKLAB ledger entry, if logged, stays.)")) { if (window.StackData) StackData.tombstone("pulsePost", id); posts = posts.filter(function (p) { return p.id !== id; }); savePosts(); render(); toast("Stopped tracking"); } }
         else if (act === "delall") {
           var wasLogged = !!post.ledgerLoggedAt;
           if (!confirm("Delete this post everywhere?" + (wasLogged ? " Its HOOKLAB ledger entry is removed too." : ""))) return;
+          if (window.StackData) StackData.tombstone("pulsePost", id);
           posts = posts.filter(function (p) { return p.id !== id; }); savePosts();
           var removed = deleteLedgerEntry(post);
+          if (removed && window.StackData) StackData.tombstone("hooklabLedger", "pulse_" + id);
           render();
           toast(removed ? "Deleted here and from the HOOKLAB ledger" : "Deleted");
         }
@@ -840,6 +842,7 @@
       var sx = $("#stackexport"); if (sx) sx.addEventListener("click", function () { window.StackData.exportToFile(); });
       var si = $("#stackimport"); if (si) si.addEventListener("click", function () { $("#stackfile").click(); });
       var sf = $("#stackfile"); if (sf) sf.addEventListener("change", function (e) { var f = e.target.files && e.target.files[0]; if (f) window.StackData.importFromFile(f, function (msg) { toast(msg); }); e.target.value = ""; });
+      if (window.StackData.bindSyncUI) window.StackData.bindSyncUI(toast);
     }
 
     render();

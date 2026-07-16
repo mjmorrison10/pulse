@@ -94,6 +94,10 @@
         <button class="iconbtn" id="stackexport" title="Back up all 4 apps (RECALL, HOOKLAB, BLAST, PULSE) in one file">STACK BACKUP</button>
         <button class="iconbtn" id="stackimport" title="Restore all 4 apps from a stack backup">STACK RESTORE</button>
         <input type="file" id="stackfile" accept="application/json,.json" style="display:none">
+        <button class="iconbtn" id="stacksync" title="Keep this device and your phone in step through your own Google Drive (never uploads API keys)">SYNC DRIVE</button>
+        <button class="iconbtn" id="stackmerge" title="Fold another backup in without deleting anything">MERGE FILE</button>
+        <input type="file" id="stackmergefile" accept="application/json,.json" style="display:none">
+        <div id="syncstatus" style="flex-basis:100%;font-size:11px;color:var(--faint);font-family:var(--mono);margin-top:2px"></div>
       </div>
     </div>
     <div id="posts"></div>
