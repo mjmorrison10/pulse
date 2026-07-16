@@ -752,7 +752,7 @@
         // A whole-stack backup picked here routes to the stack importer.
         if (window.StackData && window.StackData.isStackBackup(data)) {
           if (confirm("This is a whole-stack backup. Restore it? It REPLACES data in all four apps on this device.\n\nContains: " + window.StackData.summary(data))) {
-            window.StackData.importAll(data).then(function () { location.reload(); });
+            window.StackData.importAll(data, { replace: true }).then(function () { location.reload(); });
           }
           return;
         }
