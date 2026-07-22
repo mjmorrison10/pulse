@@ -144,6 +144,11 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand)}
 .snaprow{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
 .snaprow input{max-width:120px}
 .snaprow .lab{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.stepbtn{width:34px;min-height:34px;flex:none;border:1px solid var(--border);background:var(--surface2);
+  color:var(--ink);border-radius:8px;font-size:16px;line-height:1;cursor:pointer;padding:0}
+.stepbtn:hover{border-color:var(--brand)}
+.stepbtn:active{background:var(--brand-ghost)}
+.snaprow input.changed,.prow input.changed{border-color:var(--brand)}
 
 .outcomerow{display:flex;gap:8px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);flex-wrap:wrap}
 .outcomerow .lab{font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -246,7 +251,8 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand)}
   .cliphead{padding:10px 10px}
   .clipbody{padding:0 6px 6px}
   .outcomerow{margin-top:8px;padding-top:8px}
-  .prow{padding:7px 9px;gap:8px}
-  .prow input{max-width:82px}
+  .prow{padding:7px 9px;gap:6px}
+  .prow input{max-width:70px}
   .prow .btn{padding:7px 9px;font-size:11px}
+  .prow .stepbtn{width:30px;min-height:30px;font-size:15px}
 }
