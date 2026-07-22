@@ -104,6 +104,21 @@
     if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, "") + "K";
     return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
   }
+  // Views move in orders of magnitude — step ~1% of scale so +/- is useful at
+  // 300 views and at 300k. 0-99 -> 1, 100-999 -> 10, 1k-9.9k -> 100, else 1000.
+  function stepFor(v) { v = Number(v) || 0; return v < 100 ? 1 : v < 1000 ? 10 : v < 10000 ? 100 : 1000; }
+  // The views input, pre-filled with the last recorded number (raw digits, never
+  // fmtNum) and flanked by -/+ steppers. data-base marks the prefill so we can
+  // flag a "changed" cue and the steppers know where to start from an empty box.
+  function snapInputHTML(post, ph) {
+    var l = latestSnap(post);
+    var val = l ? String(l.views) : "";
+    return '<button class="stepbtn" type="button" data-act="step" data-dir="-1" data-id="' + post.id + '" aria-label="decrease">−</button>' +
+      '<input type="number" min="0" inputmode="numeric" placeholder="' + (ph || "views") + '"' +
+      (val ? ' value="' + val + '" data-base="' + val + '"' : '') +
+      ' id="snap-' + post.id + '">' +
+      '<button class="stepbtn" type="button" data-act="step" data-dir="1" data-id="' + post.id + '" aria-label="increase">+</button>';
+  }
   function relTime(ms) {
     var d = Date.now() - ms, m = Math.round(d / 60000);
     if (m < 1) return "just now";
@@ -458,7 +473,7 @@
       var snaprow = '<div class="snaprow">' +
         (yt ? '<button class="btn ghost" data-act="check" data-id="' + post.id + '">Check now</button>' : '') +
         '<span class="lab">Log views:</span>' +
-        '<input type="number" min="0" inputmode="numeric" placeholder="e.g. 12400" id="snap-' + post.id + '">' +
+        snapInputHTML(post, "e.g. 12400") +
         '<button class="btn ghost" data-act="rec" data-id="' + post.id + '">Record</button>' +
         (due != null ? '<span class="lab" style="color:var(--warn)">' + ckLabel(due) + ' check is due</span>' : '') +
         '</div>';
@@ -511,7 +526,7 @@
       (due != null ? '<span class="prowdue">' + ckLabel(due) + ' due</span>' : (post.snapshots.length ? '<span class="prowok">✓</span>' : '')) +
       '</div></div>' +
       link +
-      '<input type="number" min="0" inputmode="numeric" placeholder="views" id="snap-' + post.id + '">' +
+      snapInputHTML(post) +
       '<button class="btn ghost" data-act="rec" data-id="' + post.id + '">Record</button>' +
       '</div>';
   }
@@ -636,12 +651,22 @@
         }
         else if (act === "check") { checkYouTube(post, { loud: true }).then(function (ok) { if (ok) { render(); toast("Updated from YouTube"); } }); }
         else if (act === "rec") { recordManual(post); }
+        else if (act === "step") {
+          var sinp = $("#snap-" + id); if (!sinp) return;
+          var cur = Number(sinp.value);
+          if (sinp.value.trim() === "" || isNaN(cur)) cur = Number(sinp.getAttribute("data-base")) || 0;
+          var nv = Math.max(0, cur + Number(el.getAttribute("data-dir")) * stepFor(cur));
+          sinp.value = nv;
+          var sbase = sinp.getAttribute("data-base");
+          sinp.classList.toggle("changed", sbase != null && String(nv) !== sbase);
+        }
         else if (act === "focusrec") { var inp = $("#snap-" + id); if (inp) inp.focus(); }
         else if (act === "outcome") { var o = el.getAttribute("data-outcome"); if (logToLedger(post, o)) { render(); toast("Logged as " + o + " in your HOOKLAB ledger"); } }
       });
     });
     host.querySelectorAll("input[id^='snap-']").forEach(function (inp) {
       inp.addEventListener("keydown", function (e) { if (e.key === "Enter") { var id = inp.id.slice(5); var p = findPost(id); if (p) recordManual(p, { advance: true }); } });
+      inp.addEventListener("input", function () { var b = inp.getAttribute("data-base"); inp.classList.toggle("changed", b != null && inp.value !== b); });
     });
   }
   function findPost(id) { for (var i = 0; i < posts.length; i++) if (posts[i].id === id) return posts[i]; return null; }
