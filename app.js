@@ -16,6 +16,8 @@
   var LS_POSTS = "pulse_posts_v1";
   var LS_SETTINGS = "pulse_settings_v1";
   var LS_BLAST = "blast_session_v1";
+  // BLAST's batch queue — many clips, each with its own per-platform records.
+  var LS_BLAST_QUEUE = "blast_queue_v1";
   var LS_HOOKLAB = "hooklab_state_v1";
   var HOOKLAB_URL = "https://mjmorrison10.github.io/Hooklabs/";
 
@@ -305,18 +307,26 @@
     if (clipKey) p.clipKey = String(clipKey).slice(0, 300);
     return p;
   }
-  function importFromBlast() {
-    var raw = null; try { raw = localStorage.getItem(LS_BLAST); } catch (e) {}
-    if (!raw) { toast("No BLAST session found in this browser — post something in BLAST first"); return; }
-    var s = null; try { s = JSON.parse(raw); } catch (e) {}
-    if (!s) { toast("BLAST session couldn't be read"); return; }
+  // Import one clip's worth of BLAST records. `rec` is the BLAST session shape
+  // — {status, postUrl, postedAt, postedCaption, captions, base, videoHook} —
+  // which a batch-queue clip also matches (text -> base, hookText -> videoHook).
+  // clipKeyOverride lets a queued clip group by its RECALL identity instead of
+  // by hook text, so a batch of 24 clips can never collapse into one.
+  function importClipRecord(s, clipKeyOverride, counters) {
+    // A one-clip session could identify a post by platform + posted time. A
+    // batch cannot: two clips marked posted to the same platform in the same
+    // millisecond would collide and silently dedupe each other away. Queued
+    // clips therefore scope the key by their RECALL identity. Legacy session
+    // imports keep the original format so posts tracked before this still
+    // dedupe on re-import.
+    var keyScope = clipKeyOverride ? clipKeyOverride + "|" : "";
     var status = s.status || {}, postUrl = s.postUrl || {}, postedAt = s.postedAt || {},
       postedCaption = s.postedCaption || {}, captions = s.captions || {};
     var hook = (s.videoHook || "").trim();
     // Clip-level key shared by every platform of this clip: the hook if set, else
     // the base caption (written once, before per-platform tailoring). Per-platform
     // captions differ, so we must NOT group on those.
-    var clipKey = hook || String(s.base || "").trim();
+    var clipKey = clipKeyOverride || hook || String(s.base || "").trim();
     // A BLAST session = one clip. Every platform imported in this call shares
     // one clipId, so a clip groups even when it has NO hook AND no base caption.
     // Reuse the clipId already carried by any tracked post of this same clip
@@ -333,18 +343,18 @@
         match = Object.keys(status).some(function (name) {
           if (status[name] !== "posted") return false;
           var u = (postUrl[name] || "").trim();
-          return p.blastKey === name + "|" + postedAt[name] || (u && p.platform === name && p.url === u);
+          return p.blastKey === keyScope + name + "|" + postedAt[name] || (u && p.platform === name && p.url === u);
         });
       }
       if (match) { clipId = p.clipId; clipIdAt = p.postedAt; }
     });
     if (!clipId) clipId = uid();
-    var added = 0, skipped = 0, nolink = 0, healed = 0;
+    var c = counters;
     Object.keys(status).forEach(function (name) {
       if (status[name] !== "posted") return;
       var url = (postUrl[name] || "").trim();
       var at = postedAt[name] || Date.now();
-      var blastKey = name + "|" + at;
+      var blastKey = keyScope + name + "|" + at;
       // Dedupe on the BLAST session key when we have one; fall back to the old
       // (platform,url) match so posts imported before this change still dedupe.
       var dupe = null;
@@ -359,31 +369,62 @@
         if (dupe.clipId !== clipId) {
           if (dupe.clipId) dupe.clipIdPrev = dupe.clipId;
           dupe.clipId = clipId;
-          healed++;
+          c.healed++;
         }
-        skipped++;
+        c.skipped++;
         return;
       }
       var cap = postedCaption[name] || captions[name] || s.base || "";
       var np = makePost(name, url, cap, at, hook, blastKey, clipKey);
       np.clipId = clipId;
       posts.unshift(np);
-      if (!url) nolink++;
-      added++;
+      if (!url) c.nolink++;
+      c.added++;
     });
-    if (added || healed) savePosts();
-    render();
-    if (added) {
-      var msg = "Imported " + added + " post" + (added > 1 ? "s" : "") + " from BLAST";
-      if (nolink) msg += " — " + nolink + " without links yet (add each link on its card for stats)";
-      else if (skipped) msg += " (" + skipped + " already tracked)";
-      if (healed) msg += ", regrouped " + healed + " already-tracked";
-      toast(msg);
+  }
+
+  function importFromBlast() {
+    var raw = null; try { raw = localStorage.getItem(LS_BLAST); } catch (e) {}
+    var s = null; try { s = raw ? JSON.parse(raw) : null; } catch (e) {}
+    // BLAST can now hand over a whole batch. Each queued clip is imported as
+    // its own record keyed by its RECALL identity, so 24 clips stay 24 clips
+    // instead of fusing under one clipId.
+    var queue = null;
+    try { queue = JSON.parse(localStorage.getItem(LS_BLAST_QUEUE)) || null; } catch (e) {}
+    var qclips = (queue && queue.v === 1 && Array.isArray(queue.clips)) ? queue.clips : [];
+    if (!s && !qclips.length) {
+      toast("No BLAST session found in this browser — post something in BLAST first");
+      return;
     }
-    else if (healed) toast("Regrouped " + healed + " already-tracked post" + (healed > 1 ? "s" : "") + " into this clip")
-    else if (skipped) toast("Those BLAST posts are already tracked");
+    var c = { added: 0, skipped: 0, nolink: 0, healed: 0 };
+    var clipsSeen = 0;
+    if (s) { importClipRecord(s, null, c); clipsSeen++; }
+    qclips.forEach(function (clip) {
+      // The quick-post card is the session's own projection — importing both
+      // would double-count it.
+      if (s && clip.key === "quick") return;
+      if (!clip.status || !Object.keys(clip.status).length) return;
+      importClipRecord({
+        status: clip.status, postUrl: clip.postUrl, postedAt: clip.postedAt,
+        postedCaption: clip.postedCaption, captions: clip.captions,
+        base: clip.text, videoHook: clip.hookText,
+      }, clip.key, c);
+      clipsSeen++;
+    });
+    if (c.added || c.healed) savePosts();
+    render();
+    if (c.added) {
+      var msg = "Imported " + c.added + " post" + (c.added > 1 ? "s" : "") + " from BLAST";
+      if (clipsSeen > 1) msg += " across " + clipsSeen + " clips";
+      if (c.nolink) msg += " — " + c.nolink + " without links yet (add each link on its card for stats)";
+      else if (c.skipped) msg += " (" + c.skipped + " already tracked)";
+      if (c.healed) msg += ", regrouped " + c.healed + " already-tracked";
+      toast(msg, c.nolink ? 6000 : undefined);
+    }
+    else if (c.healed) toast("Regrouped " + c.healed + " already-tracked post" + (c.healed > 1 ? "s" : "") + " into this clip")
+    else if (c.skipped) toast("Those BLAST posts are already tracked");
     else toast("Nothing marked Posted in BLAST yet");
-    if (added) autoCheckDue(false);
+    if (c.added) autoCheckDue(false);
   }
 
   // ---------- sparkline ----------
