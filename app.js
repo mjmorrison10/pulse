@@ -95,7 +95,7 @@
 
   // ---------- toast ----------
   var toastT;
-  function toast(msg) { var el = $("#toast"); el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(function () { el.classList.remove("show"); }, 2600); }
+  function toast(msg, ms) { var el = $("#toast"); el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(function () { el.classList.remove("show"); }, ms || 2600); }
 
   // ---------- formatting ----------
   function fmtNum(n) {
@@ -180,10 +180,25 @@
       await sleep(backoff[attempt - 1] || 9000);
     }
   }
+  // A hung fetch never rejects on its own — without a deadline the check-all
+  // loop would stall forever on one dead request. 15s per attempt is generous
+  // for a stats call that normally answers in under a second.
+  var YT_TIMEOUT_MS = 15000;
+  function fetchWithTimeout(url, ms) {
+    var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    var t = ctrl ? setTimeout(function () { ctrl.abort(); }, ms) : null;
+    return fetch(url, ctrl ? { signal: ctrl.signal } : undefined).then(
+      function (res) { if (t) clearTimeout(t); return res; },
+      function (err) {
+        if (t) clearTimeout(t);
+        if (err && err.name === "AbortError") throw new Error("YouTube request timed out — check your connection and try again");
+        throw err;
+      });
+  }
   async function fetchYouTubeStats(id, key) {
     var url = "https://www.googleapis.com/youtube/v3/videos?part=statistics&id=" +
       encodeURIComponent(id) + "&key=" + encodeURIComponent(key);
-    var res = await fetchWithRetry(function () { return fetch(url); });
+    var res = await fetchWithRetry(function () { return fetchWithTimeout(url, YT_TIMEOUT_MS); });
     if (!res.ok) {
       if (res.status === 400 || res.status === 403) throw new Error("YouTube API key rejected or quota exhausted — check Settings");
       throw new Error("YouTube error " + res.status);
@@ -204,18 +219,33 @@
       recordSnapshot(post, stats, "auto");
       savePosts();
       return true;
-    } catch (e) { if (opts.loud) toast(e.message || "YouTube check failed"); return false; }
+    } catch (e) {
+      // Quiet auto-checks used to swallow failures completely — a bad key or
+      // dead network looked identical to "nothing due". Always log, always
+      // remember the last error for the check-all summary.
+      lastCheckError = (e && e.message) || "YouTube check failed";
+      console.error("pulse: YouTube check failed for", post.url, e);
+      if (opts.loud) toast(lastCheckError, 6000);
+      return false;
+    }
   }
+  var lastCheckError = "";
   // On load / on demand: snapshot every YouTube post that has a due checkpoint.
   async function autoCheckDue(loud) {
     if (!settings.ytKey) { if (loud) toast("Add a YouTube API key in Settings first"); return; }
     var due = posts.filter(function (p) { return isYouTube(p) && ytId(p.url) && nextDue(p, Date.now()) != null; });
     if (!due.length) { if (loud) toast("No YouTube posts are due for a check right now"); return; }
-    if (loud) toast("Checking " + due.length + " YouTube post" + (due.length > 1 ? "s" : "") + "…");
     var ok = 0;
-    for (var i = 0; i < due.length; i++) { if (await checkYouTube(due[i])) ok++; }
+    for (var i = 0; i < due.length; i++) {
+      if (loud) toast("Checking " + (i + 1) + "/" + due.length + "…");
+      if (await checkYouTube(due[i])) ok++;
+    }
     render();
-    if (loud) toast(ok + " updated");
+    var failed = due.length - ok;
+    // Failures surface even on the quiet startup check — that's the whole
+    // "notify me in the app when something errors" point.
+    if (failed) toast(ok + " updated, " + failed + " failed: " + lastCheckError, 6000);
+    else if (loud) toast(ok + " updated");
   }
 
   // ---------- HOOKLAB ledger write-back ----------
