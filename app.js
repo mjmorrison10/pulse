@@ -33,7 +33,9 @@
   function ckLabel(h) { return h < 24 ? h + "h" : (h / 24) + "d"; }
 
   var posts = [];
-  var settings = { ytKey: "", view: "clips" }; // view: "clips" | "platforms"
+  // platforms: the manual-add checkbox selection, remembered per device (null
+  // until the user picks, then it always wins over any derivation).
+  var settings = { ytKey: "", view: "clips", platforms: null };
 
   // Which clip cards are open, keyed by group key. Every change rebuilds the
   // whole list, so open state must live outside the DOM; sessionStorage also
@@ -591,17 +593,25 @@
     }
     var c = { added: 0, skipped: 0, nolink: 0, healed: 0 };
     var clipsSeen = 0;
-    if (s) { importClipRecord(s, null, c); clipsSeen++; }
+    // The queue is BLAST's source of truth; blast_session_v1 is only its
+    // projection of the quick clip. Importing the session when a queue exists
+    // meant a stale projection (one left behind by an older build, or written
+    // before the last sync) could win over the real, newer clip — which is how
+    // "only part of my platforms transferred" happened. Queue present => import
+    // the queue, including its quick clip. Session only for legacy devices.
+    if (s && !qclips.length) { importClipRecord(s, null, c); clipsSeen++; }
     qclips.forEach(function (clip) {
-      // The quick-post card is the session's own projection — importing both
-      // would double-count it.
-      if (s && clip.key === "quick") return;
       if (!clip.status || !Object.keys(clip.status).length) return;
       importClipRecord({
         status: clip.status, postUrl: clip.postUrl, postedAt: clip.postedAt,
         postedCaption: clip.postedCaption, captions: clip.captions,
         base: clip.text, videoHook: clip.hookText,
-      }, clip.key, c);
+        // The quick clip keeps the LEGACY unscoped key format: it is the same
+        // clip the session path used to import, and posts already tracked from
+        // it carry unscoped blastKeys. Scoping it now would re-import every
+        // link-less post as a duplicate. Batch clips still scope by their
+        // RECALL identity, which is what keeps 24 clips from colliding.
+      }, clip.key === "quick" ? null : clip.key, c);
       clipsSeen++;
     });
     if (c.added || c.healed) savePosts();
@@ -958,19 +968,32 @@
   // "Platforms you're running": the BLAST session's active platforms if present
   // (posted/opened/copied — not skipped), else the platforms you've set caption
   // presets for, else all of them.
+  // These checkboxes used to be derived live from BLAST's last session, so
+  // every sync re-derived them and silently un-ticked platforms the user had
+  // just ticked. They're a preference now: whatever you pick is what you get,
+  // until you change it. settings live in pulse_settings_v1, which never syncs.
   function runningPlatforms() {
-    try {
-      var s = JSON.parse(localStorage.getItem(LS_BLAST));
-      if (s && s.status) {
-        var active = PLATFORMS.filter(function (n) { return ["posted", "opened", "copied"].indexOf(s.status[n]) !== -1; });
-        if (active.length) return active;
-      }
-    } catch (e) {}
+    if (Array.isArray(settings.platforms)) {
+      var saved = settings.platforms.filter(function (n) { return PLATFORMS.indexOf(n) !== -1; });
+      if (saved.length) return saved;
+    }
+    // First run on this device: the platforms you demonstrably post to — the
+    // ones your tracked posts are already on.
+    var seen = {};
+    posts.forEach(function (p) { if (p && p.platform) seen[p.platform] = 1; });
+    var tracked = PLATFORMS.filter(function (n) { return seen[n]; });
+    if (tracked.length) return tracked;
     try {
       var pr = JSON.parse(localStorage.getItem("blast_presets_v1"));
       if (pr) { var keys = PLATFORMS.filter(function (n) { return pr[n]; }); if (keys.length) return keys; }
     } catch (e) {}
     return PLATFORMS.slice();
+  }
+  function savePlatformPicks() {
+    var checked = Array.prototype.slice.call(document.querySelectorAll("#mPlatforms input[type=checkbox]:checked"))
+      .map(function (c) { return c.value; });
+    settings.platforms = checked;
+    saveSettings();
   }
 
   function renderPlatformPicks() {
@@ -980,7 +1003,7 @@
       return '<label class="' + (on[n] ? "on" : "") + '"><input type="checkbox" value="' + esc(n) + '"' + (on[n] ? " checked" : "") + '>' + esc(n) + '</label>';
     }).join("");
     host.querySelectorAll("input[type=checkbox]").forEach(function (c) {
-      c.addEventListener("change", function () { c.parentNode.classList.toggle("on", c.checked); });
+      c.addEventListener("change", function () { c.parentNode.classList.toggle("on", c.checked); savePlatformPicks(); });
     });
   }
 
@@ -1004,6 +1027,7 @@
     var checked = Array.prototype.slice.call(document.querySelectorAll("#mPlatforms input[type=checkbox]:checked"))
       .map(function (c) { return c.value; });
     if (!checked.length) { toast("Pick at least one platform"); return; }
+    savePlatformPicks(); // the set you actually posted to is the set to remember
     var url = $("#mUrl").value.trim();
     var hook = $("#mHook").value.trim();
     var caption = $("#mCaption").value.trim();
