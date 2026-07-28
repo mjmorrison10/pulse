@@ -1,0 +1,298 @@
+# Instincts generated from https://github.com/mjmorrison10/pulse
+# Generated: 2026-07-28T21:15:16.638Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: pulse-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/mjmorrison10/pulse
+---
+
+# Pulse Commit Length
+
+## Action
+
+Write moderate-length commit messages (~63 characters)
+
+## Evidence
+
+- Average commit message length: 63 chars
+- Based on 1 commits
+
+---
+id: pulse-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/mjmorrison10/pulse
+---
+
+# Pulse Naming Files
+
+## Action
+
+Use camelCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: camelCase
+
+---
+id: pulse-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/mjmorrison10/pulse
+---
+
+# Pulse Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: pulse-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/mjmorrison10/pulse
+---
+
+# Pulse Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: pulse-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/mjmorrison10/pulse
+---
+
+# Pulse Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: pulse-instinct-file-naming
+trigger: "When creating a new TypeScript file"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct File Naming
+
+## Action
+
+Name the file using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.files
+
+---
+id: pulse-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Function Naming
+
+## Action
+
+Name the function using camelCase
+
+## Evidence
+
+- Pattern in namingConventions.functions
+
+---
+id: pulse-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase
+
+## Evidence
+
+- Pattern in namingConventions.classes
+
+---
+id: pulse-instinct-constant-naming
+trigger: "When declaring a constant"
+confidence: 0.9
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE
+
+## Evidence
+
+- Pattern in namingConventions.constants
+
+---
+id: pulse-instinct-import-style
+trigger: "When importing modules"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Import Style
+
+## Action
+
+Use relative import paths
+
+## Evidence
+
+- Pattern in importStyle
+
+---
+id: pulse-instinct-export-style
+trigger: "When exporting modules or functions"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in exportStyle
+
+---
+id: pulse-instinct-commit-format
+trigger: "When writing a commit message"
+confidence: 0.7
+domain: git
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Commit Format
+
+## Action
+
+Use a freeform message without a prefix
+
+## Evidence
+
+- Pattern in commits.type
+- Example: 'Declare the ECC plugin and vendor its common + typescript rules'
+
+---
+id: pulse-instinct-commit-length
+trigger: "When writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Commit Length
+
+## Action
+
+Keep the commit message concise, around 63 characters on average
+
+## Evidence
+
+- Pattern in commits.averageLength
+
+---
+id: pulse-instinct-test-location
+trigger: "When adding new tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Test Location
+
+## Action
+
+Place test files in a separate folder from source files
+
+## Evidence
+
+- Pattern in architecture.testLocation
+
+---
+id: pulse-instinct-folder-structure
+trigger: "When organizing codebase folders"
+confidence: 0.7
+domain: architecture
+source: repo-analysis
+source_repo: mjmorrison10/pulse
+---
+
+# Pulse Instinct Folder Structure
+
+## Action
+
+Use a single-package structure with common folders like '.claude'
+
+## Evidence
+
+- Pattern in architecture.folderStructure.type
+- Pattern in architecture.folderStructure.commonFolders
+
