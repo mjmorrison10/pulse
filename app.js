@@ -106,6 +106,76 @@
     if (changed) savePosts();
   }
 
+  // Heal duplicate imports. One clip goes to one platform once, so clipId +
+  // platform identifies a tracked post. The importer used the BLAST posted-at
+  // timestamp as its identity instead, and that timestamp is re-stamped
+  // whenever a platform's Posted mark is toggled off and back on — so
+  // re-marking and re-importing minted a TWIN. Platforms whose live URL is
+  // rarely pasted (Pinterest) had no fallback match to save them, and the
+  // twins carried re-mark times rather than real posting times, which is what
+  // scrambled the by-platform order.
+  //
+  // Merge each twin group into the richest post: union the snapshots (newest
+  // reading wins a checkpoint), keep the EARLIEST postedAt (the real posting
+  // moment, which restores ordering), and never lose a url, hook, outcome or
+  // ledger stamp that only a dropped twin had. Dropped ids are tombstoned so a
+  // Drive merge can't bring them back. Posts without a clipId are hand-added
+  // and are never touched.
+  function healImportTwins() {
+    var groups = {};
+    posts.forEach(function (p) {
+      if (!p || !p.clipId) return;
+      var k = p.clipId + "|" + p.platform;
+      (groups[k] = groups[k] || []).push(p);
+    });
+    var drop = {}, merged = 0;
+    Object.keys(groups).forEach(function (k) {
+      var list = groups[k];
+      if (list.length < 2) return;
+      // Richest first: a manual verdict, then a live link, then the most
+      // readings, then the earliest post.
+      var ranked = list.slice().sort(function (a, b) {
+        var ao = a.outcome ? 1 : 0, bo = b.outcome ? 1 : 0;
+        if (ao !== bo) return bo - ao;
+        var au = (a.url || "").trim() ? 1 : 0, bu = (b.url || "").trim() ? 1 : 0;
+        if (au !== bu) return bu - au;
+        var an = (a.snapshots || []).length, bn = (b.snapshots || []).length;
+        if (an !== bn) return bn - an;
+        return a.postedAt - b.postedAt;
+      });
+      var keep = ranked[0], rest = ranked.slice(1);
+      var byMin = {};
+      list.forEach(function (p) {
+        (p.snapshots || []).forEach(function (sn) {
+          if (!sn) return;
+          var ex = byMin[sn.elapsedMin];
+          if (!ex || (sn.at || 0) > (ex.at || 0)) byMin[sn.elapsedMin] = sn;
+        });
+      });
+      keep.snapshots = Object.keys(byMin).map(function (m) { return byMin[m]; })
+        .sort(function (x, y) { return x.elapsedMin - y.elapsedMin; });
+      list.forEach(function (p) { if (p.postedAt < keep.postedAt) keep.postedAt = p.postedAt; });
+      rest.forEach(function (p) {
+        if (!(keep.url || "").trim() && (p.url || "").trim()) keep.url = p.url;
+        if (!(keep.hook || "").trim() && (p.hook || "").trim()) keep.hook = p.hook;
+        if (!(keep.caption || "").trim() && (p.caption || "").trim()) keep.caption = p.caption;
+        if (!keep.outcome && p.outcome) { keep.outcome = p.outcome; keep.ledgerLoggedAt = p.ledgerLoggedAt || keep.ledgerLoggedAt; }
+        if (!keep.clipKey && p.clipKey) keep.clipKey = p.clipKey;
+        drop[p.id] = 1;
+        merged++;
+      });
+    });
+    if (!merged) return;
+    posts = posts.filter(function (p) { return !drop[p.id]; });
+    if (window.StackData && window.StackData.tombstone) {
+      Object.keys(drop).forEach(function (id) { window.StackData.tombstone("pulsePost", id); });
+    }
+    savePosts();
+    setTimeout(function () {
+      toast("Merged " + merged + " duplicate import" + (merged > 1 ? "s" : "") + " — one post per clip per platform", 5200);
+    }, 400);
+  }
+
   // ---------- toast ----------
   var toastT;
   function toast(msg, ms) { var el = $("#toast"); if (!el) return; el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(function () { el.classList.remove("show"); }, ms || 2600); }
@@ -328,8 +398,17 @@
   // a flat 1x elsewhere still promotes (~5.9), a marginal 3.1x against a 1.0x
   // does not (~1.8). A clip measured on one platform is unaffected — its mean is
   // its own multiple, already past OUTLIER_MULT.
+  //
+  // And a floor, MIN_VIEWS, under all of it. The relative gates ask "is this a
+  // breakout FOR YOU", which is the right question and the reason nothing here
+  // is scaled to a fixed audience — but on a platform you just started, being
+  // your own best is still nothing: a few hundred views is noise wearing a
+  // percentile. 10k is where the owner considers a post to have actually done
+  // something on any platform, so nothing below it can teach the ledger
+  // anything, however flattering its multiples look. The floor never promotes
+  // on its own: a 500k-a-post account still needs the relative gates to care.
   // Tuning lives here and nowhere else.
-  var AUTO_PROMOTE = { MIN_SAMPLE: 8, TOP_PCT: 0.10, OUTLIER_MULT: 3, CROSS_MULT: 2 };
+  var AUTO_PROMOTE = { MIN_SAMPLE: 8, TOP_PCT: 0.10, OUTLIER_MULT: 3, CROSS_MULT: 2, MIN_VIEWS: 10000 };
   var AUTO_PREFIX = "pulseauto_";
   // Same hook, different wording: the clip is cut in RECALL, then the caption
   // comes from the FULL transcription in BLAST, so the same hook can arrive
@@ -393,6 +472,7 @@
       var st = stats[p.platform];
       if (!st) return false;
       var v = autoViews(p);
+      if (v < AUTO_PROMOTE.MIN_VIEWS) return false; // below this, percentiles are noise
       return v >= st.cutoff && v >= st.med * AUTO_PROMOTE.OUTLIER_MULT;
     }
 
@@ -592,12 +672,22 @@
       var url = (postUrl[name] || "").trim();
       var at = postedAt[name] || Date.now();
       var blastKey = keyScope + name + "|" + at;
-      // Dedupe on the BLAST session key when we have one; fall back to the old
-      // (platform,url) match so posts imported before this change still dedupe.
+      // Identity, strongest first:
+      //   1. clip + platform — one clip goes to one platform once, so this is
+      //      what a tracked post actually IS. It is checked first because the
+      //      BLAST key below is NOT stable: toggling a platform's Posted mark
+      //      off and on re-stamps postedAt, which minted a duplicate on the
+      //      next import (worst on platforms whose live URL is rarely pasted,
+      //      so the url fallback couldn't catch it either).
+      //   2. the BLAST session key — still matches posts tracked before the
+      //      clip had an id.
+      //   3. (platform, url) — the original fallback, for the oldest posts.
       var dupe = null;
       for (var di = 0; di < posts.length; di++) {
         var dp = posts[di];
-        if (dp.blastKey === blastKey || (url && dp.platform === name && dp.url === url)) { dupe = dp; break; }
+        if ((clipId && dp.clipId === clipId && dp.platform === name) ||
+            dp.blastKey === blastKey ||
+            (url && dp.platform === name && dp.url === url)) { dupe = dp; break; }
       }
       if (dupe) {
         // Re-import heals grouping: unify this clip's shared clipId onto posts
@@ -1172,6 +1262,7 @@
 
     loadAll();
     migrateClipIds();
+    healImportTwins();
     // Opening PULSE is itself a sync point: views recorded on another device,
     // or posts arriving through Drive sync, get their hooks promoted here.
     try { var d0 = syncAutoWinners(); if (d0) announceAuto(d0); }
