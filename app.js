@@ -315,8 +315,21 @@
   //     10%, but nothing is 3x the middle, so nothing gets promoted. Median,
   //     not mean, because the outlier being detected would drag a mean up and
   //     hide itself.
+  //
+  // Those three judge a post against ITS PLATFORM. A hook is not a platform,
+  // though, and a small platform makes a small number look big: 346 views on a
+  // new X account is top 10% and past 3x its median, while the same clip did an
+  // utterly ordinary 3,519 on Snapchat. Promoting that teaches the ledger a lie.
+  // So a fourth gate weighs the clip's platforms against each other:
+  //   * the GEOMETRIC MEAN of the clip's per-platform multiples (best views on
+  //     that platform / that platform's median, counting only platforms with a
+  //     reliable median) must clear CROSS_MULT.
+  // Geometric so magnitude carries but a single reading can't dominate: 35x with
+  // a flat 1x elsewhere still promotes (~5.9), a marginal 3.1x against a 1.0x
+  // does not (~1.8). A clip measured on one platform is unaffected — its mean is
+  // its own multiple, already past OUTLIER_MULT.
   // Tuning lives here and nowhere else.
-  var AUTO_PROMOTE = { MIN_SAMPLE: 8, TOP_PCT: 0.10, OUTLIER_MULT: 3 };
+  var AUTO_PROMOTE = { MIN_SAMPLE: 8, TOP_PCT: 0.10, OUTLIER_MULT: 3, CROSS_MULT: 2 };
   var AUTO_PREFIX = "pulseauto_";
   // Same hook, different wording: the clip is cut in RECALL, then the caption
   // comes from the FULL transcription in BLAST, so the same hook can arrive
@@ -359,7 +372,9 @@
       (byPlatform[p.platform] = byPlatform[p.platform] || []).push(p);
     });
 
-    var qualified = [];
+    // Per-platform baselines. A platform below MIN_SAMPLE has no trustworthy
+    // median, so it neither promotes a post nor argues against one.
+    var stats = {};
     Object.keys(byPlatform).forEach(function (name) {
       var pool = byPlatform[name];
       if (pool.length < AUTO_PROMOTE.MIN_SAMPLE) return;
@@ -372,27 +387,28 @@
       var slots = Math.ceil(pool.length * AUTO_PROMOTE.TOP_PCT);
       // Everyone tied with the last qualifying post is in — an arbitrary
       // tiebreak at the cutoff would make the set flap between saves.
-      var cutoff = autoViews(ranked[Math.min(slots, ranked.length) - 1]);
-      ranked.forEach(function (p) {
-        var v = autoViews(p);
-        if (v < cutoff) return;
-        if (v < med * AUTO_PROMOTE.OUTLIER_MULT) return;
-        if (p.outcome) return;      // a manual verdict outranks the math, either way
-        if (!autoHook(p)) return;   // an entry reading "(clip)" teaches nothing
-        qualified.push({ post: p, views: v, med: med, platform: name, n: pool.length });
-      });
+      stats[name] = { med: med, n: pool.length, cutoff: autoViews(ranked[Math.min(slots, ranked.length) - 1]) };
     });
+    function qualifies(p) {
+      var st = stats[p.platform];
+      if (!st) return false;
+      var v = autoViews(p);
+      return v >= st.cutoff && v >= st.med * AUTO_PROMOTE.OUTLIER_MULT;
+    }
 
     // One entry per HOOK, not per post: the same clip posted to five platforms,
-    // or re-cut with different wording, is one hook that worked.
+    // or re-cut with different wording, is one hook that worked. Grouping runs
+    // over EVERY measured post of the clip, not just the ones that qualify —
+    // the posts that DIDN'T break out are exactly the evidence the
+    // cross-platform gate needs.
     var groups = [], byKey = {};
-    qualified.forEach(function (q) {
-      var p = q.post;
+    list.forEach(function (p) {
+      if (!p || !autoViews(p) || !autoHook(p)) return;
       var ck = String(p.clipKey || "").trim();
       var k = p.clipId ? "g:" + p.clipId : (ck ? "c:" + ck.toLowerCase() : "h:" + autoHook(p).toLowerCase());
       var g = byKey[k];
       if (!g) { g = byKey[k] = { items: [], toks: tokens(autoHook(p)) }; groups.push(g); }
-      g.items.push(q);
+      g.items.push(p);
     });
     var merged = [];
     groups.forEach(function (g) {
@@ -403,28 +419,54 @@
     });
 
     var pct = Math.round(AUTO_PROMOTE.TOP_PCT * 100);
-    return merged.map(function (g) {
-      g.items.sort(function (a, b) { return (b.views - a.views) || (a.post.postedAt - b.post.postedAt); });
-      var top = g.items[0], also = [];
-      g.items.forEach(function (q) {
-        if (q.platform !== top.platform && also.indexOf(q.platform) < 0) also.push(q.platform);
+    var out = [];
+    merged.forEach(function (g) {
+      // Candidates: posts that broke out on their own platform and carry no
+      // manual verdict (the user's own call outranks the math, either way).
+      var cands = g.items.filter(function (p) { return !p.outcome && qualifies(p); });
+      if (!cands.length) return;
+
+      // The clip's best showing on each platform that has a reliable median —
+      // one multiple per platform, however many times the clip ran there.
+      var bestBy = {};
+      g.items.forEach(function (p) {
+        var st = stats[p.platform];
+        if (!st) return;
+        var v = autoViews(p);
+        if (!bestBy[p.platform] || v > bestBy[p.platform].views) bestBy[p.platform] = { views: v, med: st.med, n: st.n };
       });
-      var notes = "auto: top " + pct + "% on " + top.platform + " — " + commas(top.views) +
-        " views vs " + commas(top.med) + " median (n=" + top.n + ")" +
+      var names = Object.keys(bestBy);
+      if (!names.length) return;
+      var logSum = 0;
+      names.forEach(function (n) { logSum += Math.log(bestBy[n].views / bestBy[n].med); });
+      var crossMult = Math.exp(logSum / names.length);
+      // The balance gate: one small platform can no longer carry a hook the
+      // rest of the clip's record calls ordinary.
+      if (crossMult < AUTO_PROMOTE.CROSS_MULT) return;
+
+      cands.sort(function (a, b) { return (autoViews(b) - autoViews(a)) || (a.postedAt - b.postedAt); });
+      var top = cands[0], st = stats[top.platform], also = [];
+      cands.forEach(function (p) {
+        if (p.platform !== top.platform && also.indexOf(p.platform) < 0) also.push(p.platform);
+      });
+      var notes = "auto: top " + pct + "% on " + top.platform + " — " + commas(autoViews(top)) +
+        " views vs " + commas(st.med) + " median (n=" + st.n + ")" +
         (also.length ? "; also qualified: " + also.join(", ") : "") +
-        (top.post.url ? " · " + top.post.url : "");
-      return {
-        postIds: g.items.map(function (q) { return q.post.id; }),
+        (names.length > 1 ? "; cross-platform " + (Math.round(crossMult * 10) / 10) + "x your medians (" + names.length + " platforms)" : "") +
+        (top.url ? " · " + top.url : "");
+      out.push({
+        postIds: cands.map(function (p) { return p.id; }),
         entry: {
-          id: AUTO_PREFIX + top.post.id,
-          hook: autoHook(top.post),
+          id: AUTO_PREFIX + top.id,
+          hook: autoHook(top),
           patternId: "", family: "unknown", outcome: "winner",
           platform: top.platform, medium: mediumFor(top.platform),
-          niche: "general", retention: "", views: String(top.views),
+          niche: "general", retention: "", views: String(autoViews(top)),
           notes: notes, source: "pulse-auto"
         }
-      };
+      });
     });
+    return out;
   }
 
   // postId -> 1 for every post whose hook is currently auto-promoted (drives
