@@ -159,6 +159,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand)}
 .outcomebtn.dead.on{color:#fff;background:var(--danger);border-color:var(--danger);font-weight:700}
 .outcomebtn:hover{border-color:var(--brand)}
 .logged{font-family:var(--mono);font-size:10.5px;color:var(--pos);margin-left:4px}
+.autotag{font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;color:var(--brand);margin-left:4px;cursor:help}
 
 /* modal */
 .scrim{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:18px;z-index:60}

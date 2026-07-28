@@ -53,9 +53,18 @@
     // ytKey is shared across the stack (shared store wins; legacy local promoted).
     if (window.StackData) settings.ytKey = window.StackData.resolveKeys(settings, ["ytKey"]).ytKey || "";
   }
+  // Every posts mutation lands here, which makes it the one place the
+  // auto-promotion engine has to hook into: recording views, YouTube checks,
+  // BLAST imports, manual adds and deletes all save through it. syncAutoWinners
+  // never calls back into savePosts, so there's no recursion.
   function savePosts() {
-    try { localStorage.setItem(LS_POSTS, JSON.stringify(posts)); return true; }
-    catch (e) { toast("Couldn't save (storage full or blocked)"); return false; }
+    var ok = true;
+    try { localStorage.setItem(LS_POSTS, JSON.stringify(posts)); }
+    catch (e) { toast("Couldn't save (storage full or blocked)"); ok = false; }
+    var delta = null;
+    try { delta = syncAutoWinners(); } catch (e) { console.error("pulse: auto-promote failed", e); }
+    if (delta) announceAuto(delta);
+    return ok;
   }
   function saveSettings() {
     try { localStorage.setItem(LS_SETTINGS, JSON.stringify(settings)); return true; }
@@ -97,7 +106,7 @@
 
   // ---------- toast ----------
   var toastT;
-  function toast(msg, ms) { var el = $("#toast"); el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(function () { el.classList.remove("show"); }, ms || 2600); }
+  function toast(msg, ms) { var el = $("#toast"); if (!el) return; el.textContent = msg; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(function () { el.classList.remove("show"); }, ms || 2600); }
 
   // ---------- formatting ----------
   function fmtNum(n) {
@@ -290,6 +299,190 @@
     if (st.ledger.length === before) return false;
     try { localStorage.setItem(LS_HOOKLAB, JSON.stringify(st)); return true; }
     catch (e) { return false; }
+  }
+
+  // ---------- auto-promotion: breakout hooks -> HOOKLAB ledger ----------
+  // A hook earns its ledger entry by beating YOUR OWN posts on the SAME
+  // platform, never a hardcoded view count — 50k is a breakout for one account
+  // and a flop for another. Three gates, all required:
+  //   * the platform has at least MIN_SAMPLE posts with a recorded view count,
+  //     so a brand-new account can't promote on noise;
+  //   * the post is in the top TOP_PCT of that platform by views;
+  //   * and it clears OUTLIER_MULT x the platform MEDIAN. This is the gate that
+  //     keeps a flat account quiet: everything landing 1-3k still has a top
+  //     10%, but nothing is 3x the middle, so nothing gets promoted. Median,
+  //     not mean, because the outlier being detected would drag a mean up and
+  //     hide itself.
+  // Tuning lives here and nowhere else.
+  var AUTO_PROMOTE = { MIN_SAMPLE: 8, TOP_PCT: 0.10, OUTLIER_MULT: 3 };
+  var AUTO_PREFIX = "pulseauto_";
+  // Same hook, different wording: the clip is cut in RECALL, then the caption
+  // comes from the FULL transcription in BLAST, so the same hook can arrive
+  // longer or shorter. Token overlap catches that; exact text wouldn't.
+  var AUTO_HOOK_SIM = 0.55;
+
+  // tokens/jaccardSets follow the matching helpers in recall/topclips.js.
+  function tokens(s) {
+    var out = Object.create(null), n = 0;
+    String(s).toLowerCase().split(/\W+/).forEach(function (w) { if (w) { if (!out[w]) n++; out[w] = 1; } });
+    return { set: out, size: n };
+  }
+  function jaccardSets(a, b) {
+    if (!a.size || !b.size) return 0;
+    var inter = 0, union = a.size;
+    for (var w in b.set) { if (a.set[w]) inter++; else union++; }
+    return inter / union;
+  }
+  function autoHook(post) {
+    var h = String(post.hook || "").trim();
+    if (!h) h = String(post.caption || "").split("\n")[0].trim();
+    return h.slice(0, 300);
+  }
+  // 0 views means "not measured yet" in this workflow, not "measured as zero" —
+  // either way there's nothing to rank, so those posts sit out entirely.
+  function autoViews(post) { var s = latestSnap(post); var v = s ? Number(s.views) : 0; return v > 0 ? v : 0; }
+  function medianOf(nums) {
+    var a = nums.slice().sort(function (x, y) { return x - y; });
+    if (!a.length) return 0;
+    var m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : Math.round((a[m - 1] + a[m]) / 2);
+  }
+  function commas(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ","); }
+
+  // Pure: posts in, the ledger entries they justify out. No storage, no DOM.
+  function computeAutoWinners(list) {
+    var byPlatform = {};
+    list.forEach(function (p) {
+      if (!p || !autoViews(p)) return;
+      (byPlatform[p.platform] = byPlatform[p.platform] || []).push(p);
+    });
+
+    var qualified = [];
+    Object.keys(byPlatform).forEach(function (name) {
+      var pool = byPlatform[name];
+      if (pool.length < AUTO_PROMOTE.MIN_SAMPLE) return;
+      var med = medianOf(pool.map(autoViews));
+      if (med <= 0) return;
+      var ranked = pool.slice().sort(function (a, b) {
+        var d = autoViews(b) - autoViews(a);
+        return d !== 0 ? d : a.postedAt - b.postedAt;
+      });
+      var slots = Math.ceil(pool.length * AUTO_PROMOTE.TOP_PCT);
+      // Everyone tied with the last qualifying post is in — an arbitrary
+      // tiebreak at the cutoff would make the set flap between saves.
+      var cutoff = autoViews(ranked[Math.min(slots, ranked.length) - 1]);
+      ranked.forEach(function (p) {
+        var v = autoViews(p);
+        if (v < cutoff) return;
+        if (v < med * AUTO_PROMOTE.OUTLIER_MULT) return;
+        if (p.outcome) return;      // a manual verdict outranks the math, either way
+        if (!autoHook(p)) return;   // an entry reading "(clip)" teaches nothing
+        qualified.push({ post: p, views: v, med: med, platform: name, n: pool.length });
+      });
+    });
+
+    // One entry per HOOK, not per post: the same clip posted to five platforms,
+    // or re-cut with different wording, is one hook that worked.
+    var groups = [], byKey = {};
+    qualified.forEach(function (q) {
+      var p = q.post;
+      var ck = String(p.clipKey || "").trim();
+      var k = p.clipId ? "g:" + p.clipId : (ck ? "c:" + ck.toLowerCase() : "h:" + autoHook(p).toLowerCase());
+      var g = byKey[k];
+      if (!g) { g = byKey[k] = { items: [], toks: tokens(autoHook(p)) }; groups.push(g); }
+      g.items.push(q);
+    });
+    var merged = [];
+    groups.forEach(function (g) {
+      for (var i = 0; i < merged.length; i++) {
+        if (jaccardSets(merged[i].toks, g.toks) >= AUTO_HOOK_SIM) { merged[i].items = merged[i].items.concat(g.items); return; }
+      }
+      merged.push(g);
+    });
+
+    var pct = Math.round(AUTO_PROMOTE.TOP_PCT * 100);
+    return merged.map(function (g) {
+      g.items.sort(function (a, b) { return (b.views - a.views) || (a.post.postedAt - b.post.postedAt); });
+      var top = g.items[0], also = [];
+      g.items.forEach(function (q) {
+        if (q.platform !== top.platform && also.indexOf(q.platform) < 0) also.push(q.platform);
+      });
+      var notes = "auto: top " + pct + "% on " + top.platform + " — " + commas(top.views) +
+        " views vs " + commas(top.med) + " median (n=" + top.n + ")" +
+        (also.length ? "; also qualified: " + also.join(", ") : "") +
+        (top.post.url ? " · " + top.post.url : "");
+      return {
+        postIds: g.items.map(function (q) { return q.post.id; }),
+        entry: {
+          id: AUTO_PREFIX + top.post.id,
+          hook: autoHook(top.post),
+          patternId: "", family: "unknown", outcome: "winner",
+          platform: top.platform, medium: mediumFor(top.platform),
+          niche: "general", retention: "", views: String(top.views),
+          notes: notes, source: "pulse-auto"
+        }
+      };
+    });
+  }
+
+  // postId -> 1 for every post whose hook is currently auto-promoted (drives
+  // the card marker). Refreshed on every sync, including the boot pass.
+  var autoPromoted = {};
+  function autoSame(a, b) {
+    return !!a && !!b && a.hook === b.hook && a.platform === b.platform && a.views === b.views &&
+      a.notes === b.notes && a.outcome === b.outcome && a.source === b.source;
+  }
+  // Recompute the whole auto set from scratch and apply only the difference.
+  // Auto entries are derived state under their own id namespace, so this can
+  // never touch a manual pulse_* or HOOKLAB-native entry, and a stale entry
+  // resurrected by a sync from another device is cleaned up on the next pass.
+  // Returns a delta summary, or null when nothing changed (no write, no toast).
+  function syncAutoWinners() {
+    var desired = computeAutoWinners(posts);
+    var marks = {};
+    desired.forEach(function (d) { d.postIds.forEach(function (id) { marks[id] = 1; }); });
+    autoPromoted = marks;
+
+    var raw = null; try { raw = localStorage.getItem(LS_HOOKLAB); } catch (e) { return null; }
+    var st = {}; try { st = raw ? JSON.parse(raw) : {}; } catch (e) { st = {}; }
+    if (!st || typeof st !== "object") st = {};
+    if (!Array.isArray(st.ledger)) st.ledger = [];
+    if (!Array.isArray(st.comps)) st.comps = [];
+
+    var isAuto = function (e) { return !!e && typeof e.id === "string" && e.id.indexOf(AUTO_PREFIX) === 0; };
+    var current = {};
+    st.ledger.forEach(function (e) { if (isAuto(e)) current[e.id] = e; });
+
+    var added = 0, changed = 0, dropped = [], keep = {};
+    desired.forEach(function (d) {
+      var prev = current[d.entry.id];
+      if (!prev) { added++; keep[d.entry.id] = Object.assign({}, d.entry, { createdAt: new Date().toISOString() }); }
+      else if (!autoSame(prev, d.entry)) { changed++; keep[d.entry.id] = Object.assign({}, prev, d.entry, { createdAt: new Date().toISOString() }); }
+      else keep[d.entry.id] = prev;
+    });
+    Object.keys(current).forEach(function (id) { if (!keep[id]) dropped.push(id); });
+    if (!added && !changed && !dropped.length) return null;
+
+    st.ledger = desired.map(function (d) { return keep[d.entry.id]; })
+      .concat(st.ledger.filter(function (e) { return !isAuto(e); }));
+    try { localStorage.setItem(LS_HOOKLAB, JSON.stringify(st)); }
+    catch (e) { toast("Couldn't write to HOOKLAB ledger (storage full or blocked)"); return null; }
+    // Tombstone removals so a Drive sync doesn't bring them back; a later
+    // re-promotion carries a fresh createdAt, which outranks the tombstone.
+    if (window.StackData && window.StackData.tombstone) {
+      dropped.forEach(function (id) { window.StackData.tombstone("hooklabLedger", id); });
+    }
+    return { added: added, changed: changed, dropped: dropped.length };
+  }
+  function announceAuto(d) {
+    var bits = [];
+    if (d.added) bits.push("✦ " + d.added + " hook" + (d.added > 1 ? "s" : "") + " auto-promoted to HOOKLAB");
+    if (d.dropped) bits.push(d.dropped + " auto hook" + (d.dropped > 1 ? "s" : "") + " dropped (outperformed)");
+    if (!bits.length) return; // a figures-only refresh isn't news
+    var msg = bits.join(" · ");
+    // Whatever triggered the save ("Recorded 50K views") toasts right after we
+    // return, so wait it out instead of being overwritten by it.
+    setTimeout(function () { toast(msg, 5200); }, 1100);
   }
 
   // ---------- import from BLAST ----------
@@ -554,6 +747,7 @@
         ['winner', 'meh', 'dead'].map(function (o) {
           return '<button class="outcomebtn ' + o + (oc === o ? ' on' : '') + '" data-act="outcome" data-id="' + post.id + '" data-outcome="' + o + '">' + o.charAt(0).toUpperCase() + o.slice(1) + '</button>';
         }).join("") +
+        (autoPromoted[post.id] ? '<span class="autotag" title="Top ' + Math.round(AUTO_PROMOTE.TOP_PCT * 100) + '% on ' + esc(post.platform) + ' and past ' + AUTO_PROMOTE.OUTLIER_MULT + 'x its median — added to your HOOKLAB ledger automatically">✦ AUTO in HOOKLAB</span>' : '') +
         (post.ledgerLoggedAt ? '<span class="logged">✓ in HOOKLAB ledger</span>' : '') + '</div>';
 
       return '<div class="post">' + head + metricsHTML(post) + checksHTML(post) + snaprow + outcomerow + '</div>';
@@ -912,6 +1106,10 @@
 
     loadAll();
     migrateClipIds();
+    // Opening PULSE is itself a sync point: views recorded on another device,
+    // or posts arriving through Drive sync, get their hooks promoted here.
+    try { var d0 = syncAutoWinners(); if (d0) announceAuto(d0); }
+    catch (e) { console.error("pulse: auto-promote failed", e); }
 
     // populate platform checkboxes (pre-checked = platforms you're running) +
     // default posted-at = now (local)
