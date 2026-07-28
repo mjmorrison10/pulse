@@ -27,6 +27,12 @@
   var TEXT_PLATFORMS = { "X": 1, "Threads": 1, "LinkedIn": 1, "Pinterest": 1 };
   function mediumFor(name) { return TEXT_PLATFORMS[name] ? "text" : "video"; }
 
+  // RECALL matches a clip's hook to a proven pattern; BLAST carries the result
+  // through; PULSE stamps it on the post so an auto-promoted ledger entry can
+  // name its pattern family. Declared up here because the boot-time twin heal
+  // reads it well before the import code that writes it.
+  var PATTERN_FIELDS = ["patternId", "patternName", "patternFamily"];
+
   // Check-in schedule, in hours. A single reading "covers" every checkpoint at or
   // below its elapsed time, so late reads are honest, not backfilled.
   var CHECKPOINTS = [1, 2, 6, 24, 48, 168];
@@ -161,6 +167,7 @@
         if (!(keep.caption || "").trim() && (p.caption || "").trim()) keep.caption = p.caption;
         if (!keep.outcome && p.outcome) { keep.outcome = p.outcome; keep.ledgerLoggedAt = p.ledgerLoggedAt || keep.ledgerLoggedAt; }
         if (!keep.clipKey && p.clipKey) keep.clipKey = p.clipKey;
+        PATTERN_FIELDS.forEach(function (f) { if (!keep[f] && p[f]) keep[f] = p[f]; });
         drop[p.id] = 1;
         merged++;
       });
@@ -341,7 +348,7 @@
     var entry = {
       id: "pulse_" + post.id,
       hook: (String(post.hook || post.caption || "").split("\n")[0].slice(0, 300)) || "(clip)",
-      patternId: "", family: "unknown", outcome: outcome,
+      patternId: post.patternId || "", family: post.patternFamily || "unknown", outcome: outcome,
       platform: post.platform, medium: mediumFor(post.platform),
       niche: "general", retention: "", views: latest ? String(latest.views) : "",
       notes: "via PULSE: " + post.url,
@@ -426,6 +433,11 @@
     var inter = 0, union = a.size;
     for (var w in b.set) { if (a.set[w]) inter++; else union++; }
     return inter / union;
+  }
+  // First non-empty value of `field` across posts, in the order given.
+  function firstWith(list, field) {
+    for (var i = 0; i < list.length; i++) if (list[i] && list[i][field]) return list[i][field];
+    return "";
   }
   function autoHook(post) {
     var h = String(post.hook || "").trim();
@@ -534,12 +546,19 @@
         (also.length ? "; also qualified: " + also.join(", ") : "") +
         (names.length > 1 ? "; cross-platform " + (Math.round(crossMult * 10) / 10) + "x your medians (" + names.length + " platforms)" : "") +
         (top.url ? " · " + top.url : "");
+      // The pattern RECALL matched this hook to, taken from the best-performing
+      // post that carries one. Hand-added posts and quick clips that never went
+      // through RECALL have none, and stay honestly "unknown" rather than being
+      // guessed at — but a group where any post knows its pattern can name it.
+      var ranked = [top].concat(cands);
+      var patternId = firstWith(ranked, "patternId");
+      var family = firstWith(ranked, "patternFamily") || "unknown";
       out.push({
         postIds: cands.map(function (p) { return p.id; }),
         entry: {
           id: AUTO_PREFIX + top.id,
           hook: autoHook(top),
-          patternId: "", family: "unknown", outcome: "winner",
+          patternId: patternId, family: family, outcome: "winner",
           platform: top.platform, medium: mediumFor(top.platform),
           niche: "general", retention: "", views: String(autoViews(top)),
           notes: notes, source: "pulse-auto"
@@ -554,7 +573,10 @@
   var autoPromoted = {};
   function autoSame(a, b) {
     return !!a && !!b && a.hook === b.hook && a.platform === b.platform && a.views === b.views &&
-      a.notes === b.notes && a.outcome === b.outcome && a.source === b.source;
+      a.notes === b.notes && a.outcome === b.outcome && a.source === b.source &&
+      // Included so a re-import that finally supplies the pattern updates the
+      // entry instead of being seen as no change.
+      a.patternId === b.patternId && a.family === b.family;
   }
   // Recompute the whole auto set from scratch and apply only the difference.
   // Auto entries are derived state under their own id namespace, so this can
@@ -610,12 +632,18 @@
   }
 
   // ---------- import from BLAST ----------
+  // One cap for a hook, everywhere. It used to be 200 here and 300 at the ledger,
+  // so the ledger's slice could never actually fire.
+  var HOOK_MAX = 300;
+  // The caption-first-line fallback, named so the enrichment below can recognize
+  // its own output and replace it once a real hook shows up.
+  function captionHook(caption) { return String(caption || "").split("\n")[0].trim().slice(0, HOOK_MAX); }
   function makePost(platform, url, caption, postedAt, hook, blastKey, clipKey) {
     // hook is its own field now; when absent (legacy callers, old backups) fall
     // back to the caption's first line so nothing regresses.
-    var h = (hook != null && String(hook).trim()) ? String(hook).trim() : String(caption || "").split("\n")[0].slice(0, 200);
+    var h = (hook != null && String(hook).trim()) ? String(hook).trim() : captionHook(caption);
     var p = { id: uid(), platform: platform, url: url || "", caption: caption || "",
-      hook: h.slice(0, 200),
+      hook: h.slice(0, HOOK_MAX),
       postedAt: postedAt || Date.now(), snapshots: [], outcome: null, ledgerLoggedAt: null };
     if (blastKey) p.blastKey = blastKey;
     // clipKey groups a clip's per-platform posts even when captions (and thus the
@@ -623,6 +651,24 @@
     // the BLAST session (the hook, else the shared base caption).
     if (clipKey) p.clipKey = String(clipKey).slice(0, 300);
     return p;
+  }
+  // A re-import heals a post that was tracked before BLAST knew its hook or
+  // RECALL's matched pattern. Two cases are worth overwriting a stored hook:
+  // there isn't one, or the one there is is verbatim the caption's first line —
+  // the fallback that put captions where hooks belong in the HOOKLAB ledger.
+  // Anything else the user may have edited by hand, so it stands.
+  function enrichPost(p, hook, pat) {
+    var changed = 0;
+    if (hook) {
+      var cur = String(p.hook || "").trim();
+      if (!cur || cur === captionHook(p.caption)) {
+        if (cur !== hook.slice(0, HOOK_MAX)) { p.hook = hook.slice(0, HOOK_MAX); changed++; }
+      }
+    }
+    PATTERN_FIELDS.forEach(function (f) {
+      if (pat[f] && !p[f]) { p[f] = pat[f]; changed++; }
+    });
+    return changed;
   }
   // Import one clip's worth of BLAST records. `rec` is the BLAST session shape
   // — {status, postUrl, postedAt, postedCaption, captions, base, videoHook} —
@@ -640,6 +686,11 @@
     var status = s.status || {}, postUrl = s.postUrl || {}, postedAt = s.postedAt || {},
       postedCaption = s.postedCaption || {}, captions = s.captions || {};
     var hook = (s.videoHook || "").trim();
+    // RECALL worked out which proven pattern this clip's hook matches. It rides
+    // the whole way here so an auto-promoted ledger entry can name its family
+    // instead of every PULSE entry landing in "unknown".
+    var pat = {};
+    PATTERN_FIELDS.forEach(function (f) { pat[f] = s[f] || ""; });
     // Clip-level key shared by every platform of this clip: the hook if set, else
     // the base caption (written once, before per-platform tailoring). Per-platform
     // captions differ, so we must NOT group on those.
@@ -698,12 +749,14 @@
           dupe.clipId = clipId;
           c.healed++;
         }
+        if (enrichPost(dupe, hook, pat)) c.enriched++;
         c.skipped++;
         return;
       }
       var cap = postedCaption[name] || captions[name] || s.base || "";
       var np = makePost(name, url, cap, at, hook, blastKey, clipKey);
       np.clipId = clipId;
+      PATTERN_FIELDS.forEach(function (f) { if (pat[f]) np[f] = pat[f]; });
       posts.unshift(np);
       if (!url) c.nolink++;
       c.added++;
@@ -723,7 +776,7 @@
       toast("No BLAST session found in this browser — post something in BLAST first");
       return;
     }
-    var c = { added: 0, skipped: 0, nolink: 0, healed: 0 };
+    var c = { added: 0, skipped: 0, nolink: 0, healed: 0, enriched: 0 };
     var clipsSeen = 0;
     // The queue is BLAST's source of truth; blast_session_v1 is only its
     // projection of the quick clip. Importing the session when a queue exists
@@ -738,6 +791,7 @@
         status: clip.status, postUrl: clip.postUrl, postedAt: clip.postedAt,
         postedCaption: clip.postedCaption, captions: clip.captions,
         base: clip.text, videoHook: clip.hookText,
+        patternId: clip.patternId, patternName: clip.patternName, patternFamily: clip.patternFamily,
         // The quick clip keeps the LEGACY unscoped key format: it is the same
         // clip the session path used to import, and posts already tracked from
         // it carry unscoped blastKeys. Scoping it now would re-import every
@@ -746,7 +800,7 @@
       }, clip.key === "quick" ? null : clip.key, c);
       clipsSeen++;
     });
-    if (c.added || c.healed) savePosts();
+    if (c.added || c.healed || c.enriched) savePosts();
     render();
     if (c.added) {
       var msg = "Imported " + c.added + " post" + (c.added > 1 ? "s" : "") + " from BLAST";
@@ -754,9 +808,11 @@
       if (c.nolink) msg += " — " + c.nolink + " without links yet (add each link on its card for stats)";
       else if (c.skipped) msg += " (" + c.skipped + " already tracked)";
       if (c.healed) msg += ", regrouped " + c.healed + " already-tracked";
+      if (c.enriched) msg += ", filled in the hook/pattern on " + c.enriched;
       toast(msg, c.nolink ? 6000 : undefined);
     }
     else if (c.healed) toast("Regrouped " + c.healed + " already-tracked post" + (c.healed > 1 ? "s" : "") + " into this clip")
+    else if (c.enriched) toast("Filled in the hook and pattern on " + c.enriched + " already-tracked post" + (c.enriched > 1 ? "s" : ""))
     else if (c.skipped) toast("Those BLAST posts are already tracked");
     else toast("Nothing marked Posted in BLAST yet");
     if (c.added) autoCheckDue(false);
